@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import React, { useEffect } from 'react';
 import { BrowserRouter, Route, Routes } from 'react-router-dom';
 import MainLayout from '@/layouts/MainLayout';
 import Dashboard from '@/pages/Dashboard';
@@ -10,8 +11,15 @@ import EditPdf from '@/pages/EditPdf';
 import FillForm from '@/pages/FillForm';
 import Library from '@/pages/Library';
 import Setup from '@/pages/Setup';
+import { syncSupabaseTemplatesToLocal } from '@/lib/supabaseService';
 
 export default function App() {
+  useEffect(() => {
+    void syncSupabaseTemplatesToLocal().catch((error) => {
+      console.warn('Cloud sync failed:', error);
+    });
+  }, []);
+
   return (
     <BrowserRouter>
       <MainLayout>

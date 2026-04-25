@@ -66,4 +66,10 @@ db.version(1).stores({
   generatedDocs: '++id, name, date'
 });
 
+db.version(2).stores({
+  templates: '++id, name, cloudId',
+  formConfigs: '++id, templateId, cloudId, templateCloudId',
+  generatedDocs: '++id, name, date, cloudId'
+});
+
 export default db;

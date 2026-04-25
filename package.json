@@ -15,7 +15,6 @@
   },
   "dependencies": {
     "@google/genai": "^1.29.0",
-    "@rollup/rollup-win32-x64-msvc": "^4.60.2",
     "@supabase/supabase-js": "^2.104.1",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",

@@ -2,6 +2,7 @@ import Dexie, { type EntityTable } from 'dexie';
 
 export interface Template {
   id?: number;
+  cloudId?: number;
   name: string;
   fileData: ArrayBuffer; 
   placeholders: string[];
@@ -21,7 +22,9 @@ export interface Mapping {
 
 export interface FormConfig {
   id?: number;
+  cloudId?: number;
   templateId: number;
+  templateCloudId?: number;
   fields: FormField[];
   mappings: Mapping[];
   signaturePdfData?: ArrayBuffer; // Predefined PDF to append
@@ -35,6 +38,7 @@ export interface StoredPdfFile {
 
 export interface GeneratedDoc {
   id?: number;
+  cloudId?: number;
   name: string;
   date: string;
   size: number;
@@ -42,7 +46,9 @@ export interface GeneratedDoc {
   mimeType?: string;
   extension?: string;
   templateId?: number;
+  templateCloudId?: number;
   configId?: number;
+  configCloudId?: number;
   formData?: Record<string, string>;
   uploadedAppendages?: Record<string, StoredPdfFile>;
 }

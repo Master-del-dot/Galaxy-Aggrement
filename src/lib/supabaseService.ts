@@ -1,5 +1,5 @@
 import { supabase, arrayBufferToBase64, base64ToArrayBuffer } from './supabase';
-import { Template, FormConfig, GeneratedDoc } from '../db';
+import db, { Template, FormConfig, GeneratedDoc } from '../db';
 
 // Helper to safely decode base64 with error handling
 function safeBase64ToArrayBuffer(base64Str: string | null | undefined): ArrayBuffer | null {
@@ -61,6 +61,7 @@ export async function getTemplatesFromSupabase(): Promise<Template[]> {
     if (!fileData) return null;
     return {
       id: t.id,
+      cloudId: t.id,
       name: t.name,
       fileData,
       placeholders: t.placeholders,
@@ -87,11 +88,104 @@ export async function getTemplateByNameFromSupabase(name: string): Promise<Templ
 
   return {
     id: data.id,
+    cloudId: data.id,
     name: data.name,
     fileData,
     placeholders: data.placeholders,
     updatedAt: data.updated_at,
   };
+}
+
+export async function syncSupabaseTemplatesToLocal(): Promise<void> {
+  const cloudTemplates = await getTemplatesFromSupabase();
+  if (cloudTemplates.length === 0) return;
+
+  const localTemplates = await db.templates.toArray();
+  const localByCloudId = new Map<number, Template>();
+  const localByName = new Map<string, Template>();
+
+  localTemplates.forEach((template) => {
+    if (template.cloudId) localByCloudId.set(template.cloudId, template);
+    localByName.set(template.name, template);
+  });
+
+  await db.transaction('rw', db.templates, db.formConfigs, async () => {
+    for (const cloudTemplate of cloudTemplates) {
+      const existingByCloudId = cloudTemplate.cloudId ? localByCloudId.get(cloudTemplate.cloudId) : undefined;
+      const existingByName = localByName.get(cloudTemplate.name);
+      let localTemplateId: number;
+
+      if (existingByCloudId && existingByCloudId.id) {
+        localTemplateId = existingByCloudId.id;
+        const remoteUpdatedAt = cloudTemplate.updatedAt ? Date.parse(cloudTemplate.updatedAt) : 0;
+        const localUpdatedAt = existingByCloudId.updatedAt ? Date.parse(existingByCloudId.updatedAt) : 0;
+        if (remoteUpdatedAt > localUpdatedAt) {
+          await db.templates.update(localTemplateId, {
+            fileData: cloudTemplate.fileData,
+            placeholders: cloudTemplate.placeholders,
+            updatedAt: cloudTemplate.updatedAt,
+            cloudId: cloudTemplate.cloudId,
+          });
+        }
+      } else if (existingByName && existingByName.id) {
+        localTemplateId = existingByName.id;
+        await db.templates.update(localTemplateId, {
+          fileData: cloudTemplate.fileData,
+          placeholders: cloudTemplate.placeholders,
+          updatedAt: cloudTemplate.updatedAt,
+          cloudId: cloudTemplate.cloudId,
+        });
+      } else {
+        const localTemplate = {
+          name: cloudTemplate.name,
+          fileData: cloudTemplate.fileData,
+          placeholders: cloudTemplate.placeholders,
+          updatedAt: cloudTemplate.updatedAt,
+          cloudId: cloudTemplate.cloudId,
+        } as Template;
+        localTemplateId = await db.templates.add(localTemplate);
+      }
+
+      if (!cloudTemplate.cloudId) continue;
+      const cloudConfigs = await getFormConfigsByTemplateIdFromSupabase(cloudTemplate.cloudId);
+      const localConfigs = await db.formConfigs.where('templateId').equals(localTemplateId).toArray();
+      const localConfigByCloudId = new Map<number, FormConfig>();
+
+      localConfigs.forEach((config) => {
+        if (config.cloudId) localConfigByCloudId.set(config.cloudId, config);
+      });
+
+      for (const cloudConfig of cloudConfigs) {
+        const existingConfig = cloudConfig.cloudId ? localConfigByCloudId.get(cloudConfig.cloudId) : undefined;
+
+        if (existingConfig && existingConfig.id) {
+          const remoteUpdatedAt = cloudConfig.updatedAt ? Date.parse(cloudConfig.updatedAt) : 0;
+          const localUpdatedAt = existingConfig.updatedAt ? Date.parse(existingConfig.updatedAt) : 0;
+          if (remoteUpdatedAt > localUpdatedAt) {
+            await db.formConfigs.update(existingConfig.id, {
+              templateId: localTemplateId,
+              templateCloudId: cloudTemplate.cloudId,
+              fields: cloudConfig.fields,
+              mappings: cloudConfig.mappings,
+              signaturePdfData: cloudConfig.signaturePdfData,
+              updatedAt: cloudConfig.updatedAt,
+              cloudId: cloudConfig.cloudId,
+            });
+          }
+        } else {
+          await db.formConfigs.add({
+            templateId: localTemplateId,
+            templateCloudId: cloudTemplate.cloudId,
+            cloudId: cloudConfig.cloudId,
+            fields: cloudConfig.fields,
+            mappings: cloudConfig.mappings,
+            signaturePdfData: cloudConfig.signaturePdfData,
+            updatedAt: cloudConfig.updatedAt,
+          });
+        }
+      }
+    }
+  });
 }
 
 export async function deleteTemplateFromSupabase(cloudId?: number, name?: string): Promise<void> {
@@ -173,7 +267,9 @@ export async function getFormConfigsByTemplateIdFromSupabase(templateId: number)
 
   return (data || []).map((c: any) => ({
     id: c.id,
+    cloudId: c.id,
     templateId: c.template_id,
+    templateCloudId: c.template_id,
     fields: c.fields,
     mappings: c.mappings,
     signaturePdfData: c.signature_pdf_data ? safeBase64ToArrayBuffer(c.signature_pdf_data) : undefined,

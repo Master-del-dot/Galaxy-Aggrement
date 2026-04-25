@@ -2,6 +2,7 @@ import { useNavigate } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { formatDistanceToNow } from 'date-fns';
 import db from '@/db';
+import { deleteGeneratedDocFromSupabase } from '@/lib/supabaseService';
 
 type DownloadableDoc = {
   name: string;
@@ -15,11 +16,17 @@ export default function Library() {
   const navigate = useNavigate();
   const docs = useLiveQuery(() => db.generatedDocs.orderBy('id').reverse().toArray());
 
-  const handleDelete = async (docId?: number) => {
+  const handleDelete = async (docId?: number, cloudId?: number, docName?: string) => {
     if (!docId) return;
 
     const confirmed = window.confirm('Delete this generated PDF from the library?');
     if (!confirmed) return;
+
+    try {
+      await deleteGeneratedDocFromSupabase(cloudId, docName);
+    } catch (err) {
+      console.warn('Failed to delete from cloud:', err);
+    }
 
     await db.generatedDocs.delete(docId);
   };
@@ -84,7 +91,7 @@ export default function Library() {
               </div>
               <div className="flex flex-col sm:flex-row gap-3 md:ml-auto">
                 <button
-                  onClick={() => void handleDelete(doc.id)}
+                  onClick={() => void handleDelete(doc.id, doc.cloudId, doc.name)}
                   aria-label="Delete PDF"
                   className="shrink-0 px-5 py-3 rounded-full bg-error-container text-on-error-container font-medium hover:opacity-90 transition-opacity"
                 >

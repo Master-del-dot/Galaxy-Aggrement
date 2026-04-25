@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils';
 import db, { FormField, Mapping } from '@/db';
 import { extractPlaceholders } from '@/lib/docxHelper';
 import { autoMapPlaceholders, createFieldsFromPlaceholders } from '@/lib/templateSetup';
+import { saveTemplateToSupabase, saveFormConfigToSupabase, deleteTemplateFromSupabase, deleteFormConfigFromSupabase } from '@/lib/supabaseService';
 
 type TemplateRecord = {
   templateId: number;
@@ -113,18 +114,50 @@ export default function Setup() {
     const confirmed = window.confirm(`Delete template "${record.name}"?`);
     if (!confirmed) return;
 
-    await db.transaction('rw', db.templates, db.formConfigs, async () => {
-      await db.formConfigs.delete(record.configId);
-      await db.templates.delete(record.templateId);
-    });
+    const template = templates?.find((item) => item.id === record.templateId);
+    const config = configs?.find((item) => item.id === record.configId);
 
-    if (editingTemplateId === record.templateId) {
-      resetEditor();
+    try {
+      await Promise.all([
+        deleteTemplateFromSupabase(template?.cloudId, record.name),
+        deleteFormConfigFromSupabase(config?.cloudId, template?.cloudId),
+      ]);
+
+      await db.transaction('rw', db.templates, db.formConfigs, async () => {
+        await db.formConfigs.delete(record.configId);
+        await db.templates.delete(record.templateId);
+      });
+
+      if (editingTemplateId === record.templateId) {
+        resetEditor();
+      }
+    } catch (error) {
+      console.error('Error deleting template:', error);
+      alert('Failed to delete template from cloud. Trying local deletion...');
+      await db.transaction('rw', db.templates, db.formConfigs, async () => {
+        await db.formConfigs.delete(record.configId);
+        await db.templates.delete(record.templateId);
+      });
     }
   };
 
   const addField = (type: FormField['type'] = 'text') => {
     setFields((prev) => [...prev, createManualField(type)]);
+  };
+
+  const moveField = (id: string, direction: 'up' | 'down') => {
+    setFields((prev) => {
+      const index = prev.findIndex((field) => field.id === id);
+      if (index === -1) return prev;
+
+      const nextIndex = direction === 'up' ? index - 1 : index + 1;
+      if (nextIndex < 0 || nextIndex >= prev.length) return prev;
+
+      const nextFields = [...prev];
+      const [movedField] = nextFields.splice(index, 1);
+      nextFields.splice(nextIndex, 0, movedField);
+      return nextFields;
+    });
   };
 
   const updateField = (id: string, updates: Partial<FormField>) => {
@@ -154,9 +187,15 @@ export default function Setup() {
     if (!templateBuffer || fields.length === 0 || !templateName.trim()) return;
 
     const timestamp = new Date().toISOString();
+    let templateId: number | null = null;
+    let configId: number | null = null;
 
     try {
+      // Save to local database first
       if (editingTemplateId && editingConfigId) {
+        templateId = editingTemplateId;
+        configId = editingConfigId;
+        
         await db.transaction('rw', db.templates, db.formConfigs, async () => {
           await db.templates.update(editingTemplateId, {
             name: templateName.trim(),
@@ -173,14 +212,14 @@ export default function Setup() {
           });
         });
       } else {
-        const templateId = await db.templates.add({
+        templateId = await db.templates.add({
           name: templateName.trim(),
           fileData: templateBuffer,
           placeholders,
           updatedAt: timestamp,
         });
 
-        await db.formConfigs.add({
+        configId = await db.formConfigs.add({
           templateId: templateId as number,
           fields,
           mappings,
@@ -189,9 +228,45 @@ export default function Setup() {
         });
       }
 
+      // Now save to Supabase cloud
+      if (templateId && configId) {
+        try {
+          const savedTemplate = await saveTemplateToSupabase({
+            id: templateId,
+            name: templateName.trim(),
+            fileData: templateBuffer,
+            placeholders,
+            updatedAt: timestamp,
+          });
+
+          await db.templates.update(templateId, { cloudId: savedTemplate.cloudId });
+
+          const savedConfig = await saveFormConfigToSupabase({
+            id: configId,
+            cloudId: configs?.find((config) => config.id === configId)?.cloudId,
+            templateId: templateId,
+            templateCloudId: savedTemplate.cloudId,
+            fields,
+            mappings,
+            signaturePdfData: signatureBuffer || undefined,
+            updatedAt: timestamp,
+          });
+
+          await db.formConfigs.update(configId, {
+            cloudId: savedConfig.cloudId,
+            templateCloudId: savedConfig.templateCloudId,
+          });
+
+          console.log('✅ Template saved to Supabase!');
+        } catch (supabaseError) {
+          console.warn('⚠️ Saved to local storage but failed to sync to cloud:', supabaseError);
+          alert('Template saved locally, but cloud sync failed. Check your connection.');
+        }
+      }
+
       navigate('/fill-form');
     } catch (error) {
-      console.error(error);
+      console.error('Error saving configuration:', error);
       alert('Failed to save configuration');
     }
   };
@@ -376,9 +451,29 @@ export default function Setup() {
                         <option value="number">Number Input</option>
                         <option value="file">PDF Upload</option>
                       </select>
-                      <button onClick={() => removeField(field.id)} className="p-2 rounded-full hover:bg-error-container hover:text-on-error-container text-on-surface-variant transition-colors opacity-80 group-hover:opacity-100">
-                        <span className="material-symbols-outlined text-sm">delete</span>
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => moveField(field.id, 'up')}
+                          className="p-2 rounded-full hover:bg-surface-container-highest text-on-surface-variant transition-colors"
+                          disabled={fields.findIndex((item) => item.id === field.id) === 0}
+                          aria-label="Move field up"
+                        >
+                          <span className="material-symbols-outlined text-sm">arrow_upward</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => moveField(field.id, 'down')}
+                          className="p-2 rounded-full hover:bg-surface-container-highest text-on-surface-variant transition-colors"
+                          disabled={fields.findIndex((item) => item.id === field.id) === fields.length - 1}
+                          aria-label="Move field down"
+                        >
+                          <span className="material-symbols-outlined text-sm">arrow_downward</span>
+                        </button>
+                        <button onClick={() => removeField(field.id)} className="p-2 rounded-full hover:bg-error-container hover:text-on-error-container text-on-surface-variant transition-colors opacity-80 group-hover:opacity-100">
+                          <span className="material-symbols-outlined text-sm">delete</span>
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>

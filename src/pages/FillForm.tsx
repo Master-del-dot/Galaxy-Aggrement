@@ -1,12 +1,67 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
-import db, { StoredPdfFile } from '@/db';
+import db, { StoredPdfFile, GeneratedDoc } from '@/db';
 import { getApiUrl } from '@/lib/api';
 import { createAgreementDocument } from '@/lib/documentHelper';
+import { supabase, arrayBufferToBase64 } from '@/lib/supabase';
+import { deleteGeneratedDocFromSupabase } from '@/lib/supabaseService';
 
 function sanitizeName(value: string) {
   return value.replace(/[^a-zA-Z0-9]/g, '_');
+}
+
+// Save generated document to Supabase
+async function saveGeneratedDocToSupabase(doc: GeneratedDoc) {
+  try {
+    const fileDataBase64 = arrayBufferToBase64(doc.fileData);
+    const uploadedAppendagesJson: Record<string, { name: string; data: string }> = {};
+
+    Object.entries(doc.uploadedAppendages || {}).forEach(([key, file]) => {
+      uploadedAppendagesJson[key] = {
+        name: file.name,
+        data: arrayBufferToBase64(file.data),
+      };
+    });
+
+    const payload: any = {
+      name: doc.name,
+      date: doc.date,
+      size: doc.size,
+      file_data: fileDataBase64,
+      mime_type: doc.mimeType || 'application/pdf',
+      extension: doc.extension || 'pdf',
+      template_id: doc.templateCloudId ?? doc.templateId,
+      config_id: doc.configCloudId ?? doc.configId,
+      form_data: doc.formData || {},
+      uploaded_appendages: uploadedAppendagesJson,
+      created_at: doc.date,
+    };
+
+    if (doc.cloudId) {
+      const { data, error } = await supabase
+        .from('generated_documents')
+        .update(payload)
+        .eq('id', doc.cloudId)
+        .select();
+
+      if (error) throw error;
+      console.log('✅ Generated document updated in Supabase!');
+      return data?.[0];
+    }
+
+    const { data, error } = await supabase
+      .from('generated_documents')
+      .insert(payload)
+      .select();
+
+    if (error) throw error;
+    console.log('✅ Generated document saved to Supabase!');
+    return data?.[0];
+  } catch (err) {
+    console.warn('⚠️ Failed to save generated document to cloud:', err);
+    return null;
+  }
 }
 
 export default function FillForm() {
@@ -137,23 +192,37 @@ export default function FillForm() {
       }
 
       const fileName = `${baseName}_Agreement.${generatedFile.extension}`;
-      const payload = {
+      const now = new Date().toISOString();
+      const payload: GeneratedDoc = {
         name: fileName,
-        date: new Date().toISOString(),
+        date: now,
         size: generatedFile.bytes.byteLength,
         fileData: generatedFile.bytes.buffer,
         mimeType: generatedFile.mimeType,
         extension: generatedFile.extension,
         templateId: activeTemplate.id,
+        templateCloudId: activeTemplate.cloudId,
         configId: activeConfig.id,
+        configCloudId: activeConfig.cloudId,
         formData,
         uploadedAppendages,
       };
 
+      let newDocId: number | undefined;
       if (isEditMode && editingDocId) {
+        newDocId = editingDocId;
         await db.generatedDocs.update(editingDocId, payload);
       } else {
-        await db.generatedDocs.add(payload);
+        newDocId = await db.generatedDocs.add(payload);
+      }
+
+      const savedDoc = await saveGeneratedDocToSupabase({
+        ...payload,
+        id: newDocId,
+      });
+
+      if (savedDoc?.id && newDocId) {
+        await db.generatedDocs.update(newDocId, { cloudId: savedDoc.id });
       }
 
       navigate('/library');
